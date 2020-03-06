@@ -47,7 +47,8 @@ static irqreturn_t gpio_display_mux_det_threaded_handler(int unused, void *data)
 	return IRQ_HANDLED;
 }
 
-static int gpio_display_mux_attach(struct drm_bridge *bridge)
+static int gpio_display_mux_attach(struct drm_bridge *bridge,
+				   enum drm_bridge_attach_flags flags)
 {
 	struct gpio_display_mux *gpio_display_mux =
 			bridge_to_gpio_display_mux(bridge);
