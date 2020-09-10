@@ -37,6 +37,12 @@
 #define INFRA_TOPAXI_PROTECTEN_SET	0x0260
 #define INFRA_TOPAXI_PROTECTEN_CLR	0x0264
 
+#define BUS_PROT_UPDATE_MT8173(_mask)			\
+	BUS_PROT_UPDATE(_mask,				\
+			INFRA_TOPAXI_PROTECTEN,		\
+			INFRA_TOPAXI_PROTECTEN_CLR,	\
+			INFRA_TOPAXI_PROTECTSTA1)
+
 int mtk_infracfg_set_bus_protection(struct regmap *infracfg, u32 mask,
 		bool reg_update);
 int mtk_infracfg_clear_bus_protection(struct regmap *infracfg, u32 mask,
