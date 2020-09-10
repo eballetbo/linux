@@ -450,16 +450,76 @@
 			};
 		};
 
-		scpsys: power-controller@10006000 {
-			compatible = "mediatek,mt8173-scpsys";
-			#power-domain-cells = <1>;
+		scpsys: syscon@10006000 {
+			compatible = "mediatek,mt8173-power-controller";
 			reg = <0 0x10006000 0 0x1000>;
-			clocks = <&clk26m>,
-				 <&topckgen CLK_TOP_MM_SEL>,
-				 <&topckgen CLK_TOP_VENC_SEL>,
-				 <&topckgen CLK_TOP_VENC_LT_SEL>;
-			clock-names = "mfg", "mm", "venc", "venc_lt";
-			infracfg = <&infracfg>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* power domains of the SoC */
+			vdec@MT8173_POWER_DOMAIN_VDEC {
+				reg = <MT8173_POWER_DOMAIN_VDEC>;
+				clocks = <&topckgen CLK_TOP_MM_SEL>;
+				clock-names = "mm";
+				#power-domain-cells = <0>;
+			};
+
+			venc@MT8173_POWER_DOMAIN_VENC {
+				reg = <MT8173_POWER_DOMAIN_VENC>;
+				clocks = <&topckgen CLK_TOP_MM_SEL>,
+					 <&topckgen CLK_TOP_VENC_SEL>;
+				clock-names = "mm", "venc";
+				#power-domain-cells = <0>;
+			};
+			isp@MT8173_POWER_DOMAIN_ISP {
+				reg = <MT8173_POWER_DOMAIN_ISP>;
+				clocks = <&topckgen CLK_TOP_MM_SEL>;
+				clock-names = "mm";
+				#power-domain-cells = <0>;
+			};
+			mm@MT8173_POWER_DOMAIN_MM {
+				reg = <MT8173_POWER_DOMAIN_MM>;
+				clocks = <&topckgen CLK_TOP_MM_SEL>;
+				clock-names = "mm";
+				#power-domain-cells = <0>;
+				mediatek,infracfg = <&infracfg>;
+			};
+			venc_lt@MT8173_POWER_DOMAIN_VENC_LT {
+				reg = <MT8173_POWER_DOMAIN_VENC_LT>;
+				clocks = <&topckgen CLK_TOP_MM_SEL>,
+					 <&topckgen CLK_TOP_VENC_LT_SEL>;
+				clock-names = "mm", "venclt";
+				#power-domain-cells = <0>;
+			};
+			audio@MT8173_POWER_DOMAIN_AUDIO {
+				reg = <MT8173_POWER_DOMAIN_AUDIO>;
+				#power-domain-cells = <0>;
+			};
+			usb@MT8173_POWER_DOMAIN_USB {
+				reg = <MT8173_POWER_DOMAIN_USB>;
+				#power-domain-cells = <0>;
+			};
+			mfg_async@MT8173_POWER_DOMAIN_MFG_ASYNC {
+				reg = <MT8173_POWER_DOMAIN_MFG_ASYNC>;
+				clocks = <&clk26m>;
+				clock-names = "mfg";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+
+				mfg_2d@MT8173_POWER_DOMAIN_MFG_2D {
+					reg = <MT8173_POWER_DOMAIN_MFG_2D>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#power-domain-cells = <1>;
+
+					mfg@MT8173_POWER_DOMAIN_MFG {
+						reg = <MT8173_POWER_DOMAIN_MFG>;
+						#power-domain-cells = <0>;
+						mediatek,infracfg = <&infracfg>;
+					};
+				};
+			};
 		};
 
 		watchdog: watchdog@10007000 {
