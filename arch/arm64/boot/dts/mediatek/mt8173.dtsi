@@ -455,6 +455,7 @@
 			reg = <0 0x10006000 0 0x1000>;
 			#address-cells = <1>;
 			#size-cells = <0>;
+			#power-domain-cells = <1>;
 
 			/* power domains of the SoC */
 			vdec@MT8173_POWER_DOMAIN_VDEC {
