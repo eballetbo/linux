@@ -322,6 +322,7 @@
 			reg = <0 0x10006000 0 0x1000>;
 			#address-cells = <1>;
 			#size-cells = <0>;
+			#power-domain-cells = <1>;
 
 			audio@MT8183_POWER_DOMAIN_AUDIO {
 				reg = <MT8183_POWER_DOMAIN_AUDIO>;
