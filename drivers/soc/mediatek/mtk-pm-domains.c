@@ -24,6 +24,8 @@
 #define PWR_ON_BIT			BIT(2)
 #define PWR_ON_2ND_BIT			BIT(3)
 #define PWR_CLK_DIS_BIT			BIT(4)
+#define PWR_SRAM_CLKISO_BIT		BIT(5)
+#define PWR_SRAM_ISOINT_B_BIT		BIT(6)
 
 struct scpsys_domain {
 	struct generic_pm_domain genpd;
@@ -65,12 +67,24 @@ static int scpsys_sram_enable(struct scpsys_domain *pd)
 	u32 pdn_ack = pd->data->sram_pdn_ack_bits;
 	struct scpsys *scpsys = pd->scpsys;
 	unsigned int tmp;
+	int ret;
 
 	regmap_update_bits(scpsys->base, pd->data->ctl_offs, pd->data->sram_pdn_bits, 0);
 
 	/* Either wait until SRAM_PDN_ACK all 1 or 0 */
-	return regmap_read_poll_timeout(scpsys->base, pd->data->ctl_offs, tmp,
-					(tmp & pdn_ack) == 0, MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
+	ret = regmap_read_poll_timeout(scpsys->base, pd->data->ctl_offs, tmp,
+				       (tmp & pdn_ack) == 0, MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
+	if (ret < 0)
+		return ret;
+
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_SRAM_ISO)) {
+		regmap_update_bits(scpsys->base, pd->data->ctl_offs, PWR_SRAM_ISOINT_B_BIT,
+				   PWR_SRAM_ISOINT_B_BIT);
+		udelay(1);
+		regmap_update_bits(scpsys->base, pd->data->ctl_offs, PWR_SRAM_CLKISO_BIT, 0);
+	}
+
+	return 0;
 }
 
 static int scpsys_sram_disable(struct scpsys_domain *pd)
@@ -78,6 +92,13 @@ static int scpsys_sram_disable(struct scpsys_domain *pd)
 	u32 pdn_ack = pd->data->sram_pdn_ack_bits;
 	struct scpsys *scpsys = pd->scpsys;
 	unsigned int tmp;
+
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_SRAM_ISO)) {
+		regmap_update_bits(scpsys->base, pd->data->ctl_offs, PWR_SRAM_CLKISO_BIT,
+				   PWR_SRAM_CLKISO_BIT);
+		udelay(1);
+		regmap_update_bits(scpsys->base, pd->data->ctl_offs, PWR_SRAM_ISOINT_B_BIT, 0);
+	}
 
 	regmap_update_bits(scpsys->base, pd->data->ctl_offs, pd->data->sram_pdn_bits,
 			   pd->data->sram_pdn_bits);
