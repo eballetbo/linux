@@ -158,6 +158,8 @@ vdec_try_fmt_common(struct venus_inst *inst, struct v4l2_format *f)
 		else
 			return NULL;
 		fmt = find_format(inst, pixmp->pixelformat, f->type);
+		if (!fmt)
+			return NULL;
 	}
 
 	pixmp->width = clamp(pixmp->width, frame_width_min(inst),
@@ -518,10 +520,7 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 
 		fdata.buffer_type = HFI_BUFFER_INPUT;
 		fdata.flags |= HFI_BUFFERFLAG_EOS;
-		if (IS_V6(inst->core))
-			fdata.device_addr = 0;
-		else
-			fdata.device_addr = 0xdeadb000;
+		fdata.device_addr = 0xdeadb000;
 
 		ret = hfi_session_process_buf(inst, &fdata);
 
@@ -571,10 +570,10 @@ static int vdec_pm_get(struct venus_inst *inst)
 	int ret;
 
 	mutex_lock(&core->pm_lock);
-	ret = pm_runtime_resume_and_get(dev);
+	ret = pm_runtime_get_sync(dev);
 	mutex_unlock(&core->pm_lock);
 
-	return ret;
+	return ret < 0 ? ret : 0;
 }
 
 static int vdec_pm_put(struct venus_inst *inst, bool autosuspend)
@@ -604,7 +603,7 @@ static int vdec_pm_get_put(struct venus_inst *inst)
 	mutex_lock(&core->pm_lock);
 
 	if (pm_runtime_suspended(dev)) {
-		ret = pm_runtime_resume_and_get(dev);
+		ret = pm_runtime_get_sync(dev);
 		if (ret < 0)
 			goto error;
 
@@ -626,7 +625,7 @@ static int vdec_set_properties(struct venus_inst *inst)
 {
 	struct vdec_controls *ctr = &inst->controls.dec;
 	struct hfi_enable en = { .enable = 1 };
-	u32 ptype, decode_order, conceal;
+	u32 ptype;
 	int ret;
 
 	if (ctr->post_loop_deb_mode) {
@@ -636,37 +635,7 @@ static int vdec_set_properties(struct venus_inst *inst)
 			return ret;
 	}
 
-	if (ctr->display_delay_enable && ctr->display_delay == 0) {
-		ptype = HFI_PROPERTY_PARAM_VDEC_OUTPUT_ORDER;
-		decode_order = HFI_OUTPUT_ORDER_DECODE;
-		ret = hfi_session_set_property(inst, ptype, &decode_order);
-		if (ret)
-			return ret;
-	}
-
-	ptype = HFI_PROPERTY_PARAM_VDEC_CONCEAL_COLOR;
-	conceal = ctr->conceal_color & 0xffff;
-	conceal |= ((ctr->conceal_color >> 16) & 0xffff) << 10;
-	conceal |= ((ctr->conceal_color >> 32) & 0xffff) << 20;
-
-	ret = hfi_session_set_property(inst, ptype, &conceal);
-	if (ret)
-		return ret;
-
 	return 0;
-}
-
-static int vdec_set_work_route(struct venus_inst *inst)
-{
-	u32 ptype = HFI_PROPERTY_PARAM_WORK_ROUTE;
-	struct hfi_video_work_route wr;
-
-	if (!IS_V6(inst->core))
-		return 0;
-
-	wr.video_work_route = inst->core->res->num_vpp_pipes;
-
-	return hfi_session_set_property(inst, ptype, &wr);
 }
 
 #define is_ubwc_fmt(fmt) (!!((fmt) & HFI_COLOR_FORMAT_UBWC_BASE))
@@ -676,14 +645,14 @@ static int vdec_output_conf(struct venus_inst *inst)
 	struct venus_core *core = inst->core;
 	struct hfi_enable en = { .enable = 1 };
 	struct hfi_buffer_requirements bufreq;
-	u32 width = inst->out_width;
-	u32 height = inst->out_height;
+	u32 width = inst->width;
+	u32 height = inst->height;
 	u32 out_fmt, out2_fmt;
 	bool ubwc = false;
 	u32 ptype;
 	int ret;
 
-	ret = venus_helper_set_work_mode(inst);
+	ret = venus_helper_set_work_mode(inst, VIDC_WORK_MODE_2);
 	if (ret)
 		return ret;
 
@@ -698,8 +667,8 @@ static int vdec_output_conf(struct venus_inst *inst)
 	if (width > 1920 && height > ALIGN(1080, 32))
 		ubwc = true;
 
-	/* For Venus v4/v6 UBWC format is mandatory */
-	if (IS_V4(core) || IS_V6(core))
+	/* For Venus v4 UBWC format is mandatory */
+	if (IS_V4(core))
 		ubwc = true;
 
 	ret = venus_helper_get_out_fmts(inst, inst->fmt_cap->pixfmt, &out_fmt,
@@ -712,7 +681,12 @@ static int vdec_output_conf(struct venus_inst *inst)
 	inst->output2_buf_size =
 			venus_helper_get_framesz_raw(out2_fmt, width, height);
 
-	if (is_ubwc_fmt(out_fmt)) {
+	if (is_ubwc_fmt(out_fmt) && is_ubwc_fmt(out2_fmt)) {
+		inst->opb_buftype = HFI_BUFFER_OUTPUT2;
+		inst->opb_fmt = out2_fmt;
+		inst->dpb_buftype = HFI_BUFFER_OUTPUT;
+		inst->dpb_fmt = out_fmt;
+	} else if (is_ubwc_fmt(out_fmt)) {
 		inst->opb_buftype = HFI_BUFFER_OUTPUT2;
 		inst->opb_fmt = out2_fmt;
 		inst->dpb_buftype = HFI_BUFFER_OUTPUT;
@@ -734,10 +708,6 @@ static int vdec_output_conf(struct venus_inst *inst)
 	if (ret)
 		return ret;
 
-	ret = venus_helper_set_format_constraints(inst);
-	if (ret)
-		return ret;
-
 	if (inst->dpb_fmt) {
 		ret = venus_helper_set_multistream(inst, false, true);
 		if (ret)
@@ -754,7 +724,7 @@ static int vdec_output_conf(struct venus_inst *inst)
 			return ret;
 	}
 
-	if (IS_V3(core) || IS_V4(core) || IS_V6(core)) {
+	if (IS_V3(core) || IS_V4(core)) {
 		ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT, &bufreq);
 		if (ret)
 			return ret;
@@ -763,8 +733,7 @@ static int vdec_output_conf(struct venus_inst *inst)
 			return -EINVAL;
 
 		if (inst->dpb_fmt) {
-			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2,
-						      &bufreq);
+			ret = venus_helper_get_bufreq(inst, HFI_BUFFER_OUTPUT2, &bufreq);
 			if (ret)
 				return ret;
 
@@ -997,23 +966,21 @@ reconfigure:
 	if (ret)
 		goto err;
 
-	venus_pm_load_scale(inst);
-
-	inst->next_buf_last = false;
-
 	ret = venus_helper_alloc_dpb_bufs(inst);
 	if (ret)
 		goto err;
-
-	ret = hfi_session_continue(inst);
-	if (ret)
-		goto free_dpb_bufs;
 
 	ret = venus_helper_queue_dpb_bufs(inst);
 	if (ret)
 		goto free_dpb_bufs;
 
 	ret = venus_helper_process_initial_cap_bufs(inst);
+	if (ret)
+		goto free_dpb_bufs;
+
+	venus_pm_load_scale(inst);
+
+	ret = hfi_session_continue(inst);
 	if (ret)
 		goto free_dpb_bufs;
 
@@ -1025,6 +992,7 @@ reconfigure:
 	inst->streamon_cap = 1;
 	inst->sequence_cap = 0;
 	inst->reconfig = false;
+	inst->next_buf_last = false;
 	inst->drain_active = false;
 
 	return 0;
@@ -1063,10 +1031,6 @@ static int vdec_start_output(struct venus_inst *inst)
 	inst->next_buf_last = false;
 
 	ret = vdec_set_properties(inst);
-	if (ret)
-		return ret;
-
-	ret = vdec_set_work_route(inst);
 	if (ret)
 		return ret;
 
@@ -1152,11 +1116,11 @@ static int vdec_stop_capture(struct venus_inst *inst)
 	switch (inst->codec_state) {
 	case VENUS_DEC_STATE_DECODING:
 		ret = hfi_session_flush(inst, HFI_FLUSH_ALL, true);
-		fallthrough;
+		/* fallthrough */
 	case VENUS_DEC_STATE_DRAIN:
 		inst->codec_state = VENUS_DEC_STATE_STOPPED;
 		inst->drain_active = false;
-		fallthrough;
+		/* fallthrough */
 	case VENUS_DEC_STATE_SEEK:
 		vdec_cancel_dst_buffers(inst);
 		break;
@@ -1199,6 +1163,8 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 {
 	struct venus_inst *inst = vb2_get_drv_priv(q);
 	int ret = -EINVAL;
+
+	vdec_pm_get_put(inst);
 
 	mutex_lock(&inst->lock);
 
@@ -1424,11 +1390,6 @@ static void vdec_event_change(struct venus_inst *inst,
 		inst->crop.height = ev_data->height;
 	}
 
-	inst->fw_min_cnt = ev_data->buf_count;
-	/* overwriting this to 11 for vp9 due to fw bug */
-	if (inst->hfi_codec == HFI_VIDEO_CODEC_VP9)
-		inst->fw_min_cnt = 11;
-
 	inst->out_width = ev_data->width;
 	inst->out_height = ev_data->height;
 
@@ -1446,7 +1407,6 @@ static void vdec_event_change(struct venus_inst *inst,
 		inst->codec_state = VENUS_DEC_STATE_CAPTURE_SETUP;
 		break;
 	case VENUS_DEC_STATE_DECODING:
-	case VENUS_DEC_STATE_DRAIN:
 		inst->codec_state = VENUS_DEC_STATE_DRC;
 		break;
 	default:
@@ -1460,13 +1420,15 @@ static void vdec_event_change(struct venus_inst *inst,
 	 */
 
 	if (inst->codec_state == VENUS_DEC_STATE_DRC) {
+		struct vb2_v4l2_buffer *last;
 		int ret;
 
-		inst->next_buf_last = true;
-
-		ret = hfi_session_flush(inst, HFI_FLUSH_OUTPUT, false);
-		if (ret)
-			dev_dbg(dev, VDBGH "flush output error %d\n", ret);
+		last = v4l2_m2m_last_dst_buf(inst->m2m_ctx);
+		if (last) {
+			ret = hfi_session_flush(inst, HFI_FLUSH_OUTPUT, false);
+			if (ret)
+				dev_dbg(dev, VDBGH "flush output error %d\n", ret);
+		}
 	}
 
 	inst->next_buf_last = true;
@@ -1494,9 +1456,13 @@ static void vdec_event_notify(struct venus_inst *inst, u32 event,
 	case EVT_SYS_EVENT_CHANGE:
 		switch (data->event_type) {
 		case HFI_EVENT_DATA_SEQUENCE_CHANGED_SUFFICIENT_BUF_RESOURCES:
+			if (inst->codec_state == VENUS_DEC_STATE_DRAIN)
+				inst->codec_state = VENUS_DEC_STATE_DECODING;
 			vdec_event_change(inst, data, true);
 			break;
 		case HFI_EVENT_DATA_SEQUENCE_CHANGED_INSUFFICIENT_BUF_RESOURCES:
+			if (inst->codec_state == VENUS_DEC_STATE_DRAIN)
+				inst->codec_state = VENUS_DEC_STATE_DECODING;
 			vdec_event_change(inst, data, false);
 			break;
 		case HFI_EVENT_RELEASE_BUFFER_REFERENCE:
@@ -1533,7 +1499,6 @@ static void vdec_inst_init(struct venus_inst *inst)
 	inst->crop.top = 0;
 	inst->crop.width = inst->width;
 	inst->crop.height = inst->height;
-	inst->fw_min_cnt = 8;
 	inst->out_width = frame_width_min(inst);
 	inst->out_height = frame_height_min(inst);
 	inst->fps = 30;

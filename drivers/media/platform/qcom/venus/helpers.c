@@ -19,9 +19,6 @@
 #include "hfi_platform.h"
 #include "hfi_parser.h"
 
-#define NUM_MBS_720P	(((ALIGN(1280, 16)) >> 4) * ((ALIGN(736, 16)) >> 4))
-#define NUM_MBS_4K	(((ALIGN(4096, 16)) >> 4) * ((ALIGN(2304, 16)) >> 4))
-
 enum dpb_buf_owner {
 	DRIVER,
 	FIRMWARE,
@@ -90,12 +87,28 @@ bool venus_helper_check_codec(struct venus_inst *inst, u32 v4l2_pixfmt)
 }
 EXPORT_SYMBOL_GPL(venus_helper_check_codec);
 
+static void free_dpb_buf(struct venus_inst *inst, struct intbuf *buf)
+{
+	ida_free(&inst->dpb_ids, buf->dpb_out_tag);
+
+	list_del_init(&buf->list);
+	dma_free_attrs(inst->core->dev, buf->size, buf->va, buf->da,
+		       buf->attrs);
+	kfree(buf);
+}
+
 int venus_helper_queue_dpb_bufs(struct venus_inst *inst)
 {
-	struct intbuf *buf;
+	struct intbuf *buf, *next;
+	unsigned int dpb_size = 0;
 	int ret = 0;
 
-	list_for_each_entry(buf, &inst->dpbbufs, list) {
+	if (inst->dpb_buftype == HFI_BUFFER_OUTPUT)
+		dpb_size = inst->output_buf_size;
+	else if (inst->dpb_buftype == HFI_BUFFER_OUTPUT2)
+		dpb_size = inst->output2_buf_size;
+
+	list_for_each_entry_safe(buf, next, &inst->dpbbufs, list) {
 		struct hfi_frame_data fdata;
 
 		memset(&fdata, 0, sizeof(fdata));
@@ -105,6 +118,12 @@ int venus_helper_queue_dpb_bufs(struct venus_inst *inst)
 
 		if (buf->owned_by == FIRMWARE)
 			continue;
+
+		/* free buffer from previous sequence which was released later */
+		if (dpb_size > buf->size) {
+			free_dpb_buf(inst, buf);
+			continue;
+		}
 
 		fdata.clnt_data = buf->dpb_out_tag;
 
@@ -127,13 +146,7 @@ int venus_helper_free_dpb_bufs(struct venus_inst *inst)
 	list_for_each_entry_safe(buf, n, &inst->dpbbufs, list) {
 		if (buf->owned_by == FIRMWARE)
 			continue;
-
-		ida_free(&inst->dpb_ids, buf->dpb_out_tag);
-
-		list_del_init(&buf->list);
-		dma_free_attrs(inst->core->dev, buf->size, buf->va, buf->da,
-			       buf->attrs);
-		kfree(buf);
+		free_dpb_buf(inst, buf);
 	}
 
 	if (list_empty(&inst->dpbbufs))
@@ -189,7 +202,6 @@ int venus_helper_alloc_dpb_bufs(struct venus_inst *inst)
 		buf->va = dma_alloc_attrs(dev, buf->size, &buf->da, GFP_KERNEL,
 					  buf->attrs);
 		if (!buf->va) {
-			kfree(buf);
 			ret = -ENOMEM;
 			goto fail;
 		}
@@ -209,6 +221,7 @@ int venus_helper_alloc_dpb_bufs(struct venus_inst *inst)
 	return 0;
 
 fail:
+	kfree(buf);
 	venus_helper_free_dpb_bufs(inst);
 	return ret;
 }
@@ -313,24 +326,13 @@ static const unsigned int intbuf_types_4xx[] = {
 	HFI_BUFFER_INTERNAL_PERSIST_1,
 };
 
-static const unsigned int intbuf_types_6xx[] = {
-	HFI_BUFFER_INTERNAL_SCRATCH(HFI_VERSION_6XX),
-	HFI_BUFFER_INTERNAL_SCRATCH_1(HFI_VERSION_6XX),
-	HFI_BUFFER_INTERNAL_SCRATCH_2(HFI_VERSION_6XX),
-	HFI_BUFFER_INTERNAL_PERSIST,
-	HFI_BUFFER_INTERNAL_PERSIST_1,
-};
-
 int venus_helper_intbufs_alloc(struct venus_inst *inst)
 {
 	const unsigned int *intbuf;
 	size_t arr_sz, i;
 	int ret;
 
-	if (IS_V6(inst->core)) {
-		arr_sz = ARRAY_SIZE(intbuf_types_6xx);
-		intbuf = intbuf_types_6xx;
-	} else if (IS_V4(inst->core)) {
+	if (IS_V4(inst->core)) {
 		arr_sz = ARRAY_SIZE(intbuf_types_4xx);
 		intbuf = intbuf_types_4xx;
 	} else {
@@ -533,7 +535,7 @@ static bool is_dynamic_bufmode(struct venus_inst *inst)
 	 * v4 doesn't send BUFFER_ALLOC_MODE_SUPPORTED property and supports
 	 * dynamic buffer mode by default for HFI_BUFFER_OUTPUT/OUTPUT2.
 	 */
-	if (IS_V4(core) || IS_V6(core))
+	if (IS_V4(core))
 		return true;
 
 	caps = venus_caps_by_codec(core, inst->hfi_codec, inst->session_type);
@@ -614,7 +616,7 @@ static int platform_get_bufreq(struct venus_inst *inst, u32 buftype,
 		return -EINVAL;
 
 	params.version = version;
-	params.num_vpp_pipes = inst->core->res->num_vpp_pipes;
+	params.num_vpp_pipes = hfi_platform_num_vpp_pipes(version);
 
 	if (is_dec) {
 		params.width = inst->width;
@@ -626,7 +628,8 @@ static int platform_get_bufreq(struct venus_inst *inst, u32 buftype,
 		params.dec.is_secondary_output =
 			inst->opb_buftype == HFI_BUFFER_OUTPUT2;
 		params.dec.is_interlaced =
-			inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE;
+			inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE ?
+				true : false;
 	} else {
 		params.width = inst->out_width;
 		params.height = inst->out_height;
@@ -654,15 +657,9 @@ int venus_helper_get_bufreq(struct venus_inst *inst, u32 type,
 	if (req)
 		memset(req, 0, sizeof(*req));
 
-	if (type == HFI_BUFFER_OUTPUT || type == HFI_BUFFER_OUTPUT2)
-		req->count_min = inst->fw_min_cnt;
-
 	ret = platform_get_bufreq(inst, type, req);
-	if (!ret) {
-		if (type == HFI_BUFFER_OUTPUT || type == HFI_BUFFER_OUTPUT2)
-			inst->fw_min_cnt = req->count_min;
+	if (!ret)
 		return 0;
-	}
 
 	ret = hfi_session_get_property(inst, ptype, &hprop);
 	if (ret)
@@ -1129,69 +1126,19 @@ int venus_helper_set_output_resolution(struct venus_inst *inst,
 }
 EXPORT_SYMBOL_GPL(venus_helper_set_output_resolution);
 
-static u32 venus_helper_get_work_mode(struct venus_inst *inst)
-{
-	u32 mode;
-	u32 num_mbs;
-
-	mode = VIDC_WORK_MODE_2;
-	if (inst->session_type == VIDC_SESSION_TYPE_DEC) {
-		num_mbs = (ALIGN(inst->height, 16) * ALIGN(inst->width, 16)) / 256;
-		if (inst->hfi_codec == HFI_VIDEO_CODEC_MPEG2 ||
-		    inst->pic_struct != HFI_INTERLACE_FRAME_PROGRESSIVE ||
-		    num_mbs <= NUM_MBS_720P)
-			mode = VIDC_WORK_MODE_1;
-	} else {
-		num_mbs = (ALIGN(inst->out_height, 16) * ALIGN(inst->out_width, 16)) / 256;
-		if (inst->hfi_codec == HFI_VIDEO_CODEC_VP8 &&
-		    num_mbs <= NUM_MBS_4K)
-			mode = VIDC_WORK_MODE_1;
-	}
-
-	return mode;
-}
-
-int venus_helper_set_work_mode(struct venus_inst *inst)
+int venus_helper_set_work_mode(struct venus_inst *inst, u32 mode)
 {
 	const u32 ptype = HFI_PROPERTY_PARAM_WORK_MODE;
 	struct hfi_video_work_mode wm;
-	u32 mode;
 
-	if (!IS_V4(inst->core) && !IS_V6(inst->core))
+	if (!IS_V4(inst->core))
 		return 0;
 
-	mode = venus_helper_get_work_mode(inst);
 	wm.video_work_mode = mode;
+
 	return hfi_session_set_property(inst, ptype, &wm);
 }
 EXPORT_SYMBOL_GPL(venus_helper_set_work_mode);
-
-int venus_helper_set_format_constraints(struct venus_inst *inst)
-{
-	const u32 ptype = HFI_PROPERTY_PARAM_UNCOMPRESSED_PLANE_ACTUAL_CONSTRAINTS_INFO;
-	struct hfi_uncompressed_plane_actual_constraints_info pconstraint;
-
-	if (!IS_V6(inst->core))
-		return 0;
-
-	if (inst->opb_fmt == HFI_COLOR_FORMAT_NV12_UBWC)
-		return 0;
-
-	pconstraint.buffer_type = HFI_BUFFER_OUTPUT2;
-	pconstraint.num_planes = 2;
-	pconstraint.plane_format[0].stride_multiples = 128;
-	pconstraint.plane_format[0].max_stride = 8192;
-	pconstraint.plane_format[0].min_plane_buffer_height_multiple = 32;
-	pconstraint.plane_format[0].buffer_alignment = 256;
-
-	pconstraint.plane_format[1].stride_multiples = 128;
-	pconstraint.plane_format[1].max_stride = 8192;
-	pconstraint.plane_format[1].min_plane_buffer_height_multiple = 16;
-	pconstraint.plane_format[1].buffer_alignment = 256;
-
-	return hfi_session_set_property(inst, ptype, &pconstraint);
-}
-EXPORT_SYMBOL_GPL(venus_helper_set_format_constraints);
 
 int venus_helper_set_num_bufs(struct venus_inst *inst, unsigned int input_bufs,
 			      unsigned int output_bufs,
