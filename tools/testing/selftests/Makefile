@@ -28,6 +28,7 @@ TARGETS += futex
 TARGETS += gpio
 TARGETS += hid
 TARGETS += intel_pstate
+TARGETS += input
 TARGETS += iommu
 TARGETS += ipc
 TARGETS += ir
